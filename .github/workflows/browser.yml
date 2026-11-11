@@ -5,27 +5,34 @@ name: Playwright Browser Check
 # network, and we do not wake an app for those on the free plan." A real browser
 # CAN wake it by clicking the "Wake it up" button, which is what main.py does.
 #
-# Why this shape instead of a plain "*/16 * * * *" cron:
-# GitHub's scheduled workflows are routinely delayed 5-15 minutes under load,
-# and a delayed run is a missed wake. So the schedule only starts a job once an
-# hour; the job then loops with precise 16-minute sleeps. The app is never idle
-# for more than ~16 minutes, and the internal timing does not drift.
+# Goal: 24/7 coverage, one visit every 5 minutes.
+#
+# Why not just `cron: "*/5 * * * *"`:
+# GitHub's scheduled workflows are routinely delayed 5-15 minutes under load and
+# short intervals get skipped outright. A delayed or skipped run is a missed
+# visit, and a missed visit lets the app sleep. So the cron only has to start a
+# job once an hour; each job then loops internally with precise 5-minute sleeps,
+# where the timing cannot drift. Each job covers 3 hours and a new one starts
+# every hour, so jobs overlap and coverage never has a gap. Three hours of
+# coverage per job also absorbs two consecutive skipped scheduled runs.
 on:
   schedule:
-    - cron: "0 * * * *"   # hourly kick-off; the job loops internally
+    - cron: "0 * * * *"   # hourly kick-off; each job loops for 3 hours
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: browser-check
-  cancel-in-progress: false
+# No concurrency group on purpose: jobs must overlap so the 5-minute cadence is
+# continuous across the hourly handoff. A concurrency group would serialize them
+# and open a gap at every boundary.
 
 jobs:
   browser-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 36 checks x 5 min = 180 min of coverage, plus install and per-check time.
+    # GitHub's hard cap is 6 hours per job; this stays well inside it.
+    timeout-minutes: 210
 
     steps:
       - name: Checkout repository
@@ -44,13 +51,13 @@ jobs:
       - name: Run browser check
         run: |
           set -uo pipefail
-          # 4 checks, 16 minutes apart: covers ~48 minutes per hourly job.
-          for i in 1 2 3 4; do
-            echo "::group::check $i of 4"
+          # 36 checks, 5 minutes apart = 180 minutes of coverage.
+          # The next hourly job starts long before this one ends.
+          for i in $(seq 1 36); do
+            echo "::group::check $i of 36 at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
             python main.py || echo "::warning::check $i did not see a healthy page"
             echo "::endgroup::"
-            if [ "$i" -lt 4 ]; then
-              echo "sleeping 16 minutes"
-              sleep 960
+            if [ "$i" -lt 36 ]; then
+              sleep 300
             fi
           done
