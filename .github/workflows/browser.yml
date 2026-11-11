@@ -1,0 +1,56 @@
+name: Playwright Browser Check
+
+# blitz.cloud sleeps the app after ~15 minutes without a browser visit, and it
+# refuses to wake for automated traffic: "automated requests also come from your
+# network, and we do not wake an app for those on the free plan." A real browser
+# CAN wake it by clicking the "Wake it up" button, which is what main.py does.
+#
+# Why this shape instead of a plain "*/16 * * * *" cron:
+# GitHub's scheduled workflows are routinely delayed 5-15 minutes under load,
+# and a delayed run is a missed wake. So the schedule only starts a job once an
+# hour; the job then loops with precise 16-minute sleeps. The app is never idle
+# for more than ~16 minutes, and the internal timing does not drift.
+on:
+  schedule:
+    - cron: "0 * * * *"   # hourly kick-off; the job loops internally
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-check
+  cancel-in-progress: false
+
+jobs:
+  browser-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run browser check
+        run: |
+          set -uo pipefail
+          # 4 checks, 16 minutes apart: covers ~48 minutes per hourly job.
+          for i in 1 2 3 4; do
+            echo "::group::check $i of 4"
+            python main.py || echo "::warning::check $i did not see a healthy page"
+            echo "::endgroup::"
+            if [ "$i" -lt 4 ]; then
+              echo "sleeping 16 minutes"
+              sleep 960
+            fi
+          done
