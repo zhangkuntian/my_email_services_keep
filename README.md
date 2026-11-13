@@ -40,6 +40,16 @@ Standard GitHub-hosted runners are **free for public repositories** (GitHub's
 billing docs list them as usage that "remains free independently"), so the extra
 runs cost nothing.
 
+## Caching the browser
+
+A cold run spends most of its time downloading Chromium (~170 MB), not visiting
+the site. `~/.cache/ms-playwright` is cached under a key that includes the
+Playwright version, so a hit skips the download while a version bump correctly
+invalidates it (a different Playwright expects a different Chromium build).
+
+On a hit the workflow still runs `playwright install-deps chromium`, because the
+cache holds the browser binary but not the apt libraries it links against.
+
 ## Why the cron is only a backstop
 
 GitHub's `schedule` event is best-effort. The docs say runs *"can be delayed
@@ -108,4 +118,4 @@ worked). Exit code `1` means it could not be woken.
 | File | Purpose |
 |---|---|
 | `main.py` | Loads the page in Chromium, clicks the wake button if asleep, verifies the app answers |
-| `.github/workflows/browser.yml` | One browser visit per run; `*/5` cron as a backstop |
+| `.github/workflows/browser.yml` | One browser visit per run; caches Chromium; `*/5` cron as a backstop |

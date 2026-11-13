@@ -7,7 +7,7 @@ name: Playwright Browser Check
 #
 # One run = one browser visit. The job does NOT loop: cadence is controlled
 # entirely from outside by POSTing to the workflow_dispatch endpoint (see
-# README). That keeps each job to ~20 seconds, so runs never pile up against the
+# README). That keeps each job short, so runs never pile up against the
 # concurrency limit on a free account.
 #
 # The cron below is a backstop for when the external trigger is not configured
@@ -38,10 +38,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright
+      - name: Install Playwright package
+        run: pip install playwright
+
+      # The browser download is the slow part of a cold run, so cache it. The key
+      # carries the Playwright version: a different version expects a different
+      # Chromium build, and reusing the old cache would fail at launch time.
+      - name: Resolve Playwright version
+        id: pw
         run: |
-          pip install playwright
-          playwright install --with-deps chromium
+          version=$(python -c "import playwright; print(playwright.__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Playwright $version"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Chromium (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: playwright install --with-deps chromium
+
+      # A cache hit skips the ~170 MB download but the OS libraries still have to
+      # be present, so install only the apt dependencies.
+      - name: Install system dependencies (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Run browser check
         run: |
