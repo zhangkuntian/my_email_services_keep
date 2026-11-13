@@ -5,37 +5,29 @@ name: Playwright Browser Check
 # network, and we do not wake an app for those on the free plan." A real browser
 # CAN wake it by clicking the "Wake it up" button, which is what main.py does.
 #
-# Goal: 24/7 coverage, one visit every 5 minutes.
+# One run = one browser visit. The job does NOT loop: cadence is controlled
+# entirely from outside by POSTing to the workflow_dispatch endpoint (see
+# README). That keeps each job to ~20 seconds, so runs never pile up against the
+# concurrency limit on a free account.
 #
-# Why the cron is only a backstop:
-# GitHub's schedule event is best-effort. Documented: runs "can be delayed during
-# periods of high loads" and "some queued jobs may be dropped". Measured by
-# others on public repos: workflows scheduled every 15 minutes fired on only 64%
-# of their slots over 7 days, median start delay 7.4 minutes. A dropped or late
-# run is a missed visit, and a missed visit lets the app sleep.
-#
-# So the real driver is an external trigger hitting workflow_dispatch every 5
-# minutes (see README). The cron below only catches the case where that external
-# trigger is not configured yet: it starts a job hourly, and each job loops
-# internally for 3 hours with precise 5-minute sleeps that cannot drift.
+# The cron below is a backstop for when the external trigger is not configured
+# or has stopped. GitHub's schedule event is best-effort (runs "can be delayed
+# during periods of high loads" and "some queued jobs may be dropped"), so it is
+# not the primary driver.
 on:
   schedule:
-    - cron: "0 * * * *"   # backstop only; the external trigger is the driver
+    - cron: "*/5 * * * *"   # backstop only; the external trigger is the driver
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# No concurrency group on purpose: runs must overlap so the 5-minute cadence is
-# continuous across the hourly handoff. A concurrency group would serialize them
-# and open a gap at every boundary.
-
 jobs:
   browser-check:
     runs-on: ubuntu-latest
-    # 36 checks x 5 min = 180 min of coverage, plus install and per-check time.
-    # GitHub's hard cap is 6 hours per job; this stays well inside it.
-    timeout-minutes: 210
+    # One visit plus install. Generous for a cold runner, far below the 6-hour
+    # cap, and short enough that a stuck run cannot block the cadence.
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -55,12 +47,4 @@ jobs:
         run: |
           set -uo pipefail
           echo "triggered by: $GITHUB_EVENT_NAME at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
-          # 36 checks, 5 minutes apart = 180 minutes of coverage.
-          for i in $(seq 1 36); do
-            echo "::group::check $i of 36 at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
-            python main.py || echo "::warning::check $i did not see a healthy page"
-            echo "::endgroup::"
-            if [ "$i" -lt 36 ]; then
-              sleep 300
-            fi
-          done
+          python main.py

@@ -22,7 +22,25 @@ What works, verified against the live site: load the page in Chromium, click the
 `303`, then wait for the app to answer. `main.py` does exactly that and confirms
 the app is actually serving before it reports success.
 
-## The scheduling problem
+## One run = one visit
+
+The job does **not** loop. Each run installs Playwright, loads the page once,
+and exits — about 20 seconds of runner time. The visit cadence is controlled
+entirely from outside, by how often you POST to the `workflow_dispatch`
+endpoint.
+
+This matters because a free GitHub account allows **20 concurrent jobs**. An
+earlier version had each job loop for 3 hours (36 visits, 5 minutes apart) while
+also being dispatched every 5 minutes. That needs ~35 concurrent runners to keep
+up, so runs queued for hours and the visits happened at times unrelated to when
+they were triggered. One visit per run removes the problem: a run finishes long
+before the next one arrives.
+
+Standard GitHub-hosted runners are **free for public repositories** (GitHub's
+billing docs list them as usage that "remains free independently"), so the extra
+runs cost nothing.
+
+## Why the cron is only a backstop
 
 GitHub's `schedule` event is best-effort. The docs say runs *"can be delayed
 during periods of high loads"* and *"some queued jobs may be dropped"*. Others
@@ -30,8 +48,8 @@ measured public workflows scheduled every 15 minutes firing on only **64%** of
 their slots over 7 days, with a median start delay of **7.4 minutes**.
 
 A late or dropped run is a missed visit, and a missed visit lets the app sleep.
-So the cron in this repo is only a backstop. The reliable driver is an external
-trigger that calls `workflow_dispatch` every 5 minutes.
+So the cron in this repo (`*/5 * * * *`) is only a backstop for when the external
+trigger is missing or has stopped. The reliable driver is the external trigger.
 
 ## Setting up the external trigger
 
@@ -90,4 +108,4 @@ worked). Exit code `1` means it could not be woken.
 | File | Purpose |
 |---|---|
 | `main.py` | Loads the page in Chromium, clicks the wake button if asleep, verifies the app answers |
-| `.github/workflows/browser.yml` | Hourly backstop; each job loops 36 checks 5 minutes apart |
+| `.github/workflows/browser.yml` | One browser visit per run; `*/5` cron as a backstop |
