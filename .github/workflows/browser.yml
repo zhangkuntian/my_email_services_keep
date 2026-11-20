@@ -86,4 +86,22 @@ jobs:
         run: |
           set -uo pipefail
           echo "triggered by: $GITHUB_EVENT_NAME at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
-          node wake.mjs
+          # Logs on a public repo need a login to read, but the step summary does
+          # not. Tee the run into it so a failure is diagnosable from the run page.
+          {
+            echo '## Blitz wake run'
+            echo '```'
+            /opt/fpchromium/chrome --version 2>&1 || true
+            echo '```'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          node wake.mjs 2>&1 | tee /tmp/wake.log
+          code=${PIPESTATUS[0]}
+          set -e
+          {
+            cat /tmp/wake.log
+            echo '```'
+            echo "exit: $code"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"

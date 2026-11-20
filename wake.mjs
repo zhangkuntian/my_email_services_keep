@@ -230,6 +230,13 @@ async function main() {
     "about:blank",
   ];
 
+  // CI containers (GitHub's ubuntu runner included) cannot use Chrome's
+  // namespace sandbox, and /dev/shm is tiny there. Without these the browser
+  // either refuses to start or dies on the first renderer.
+  if (process.platform === "linux") {
+    args.unshift("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu");
+  }
+
   const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
   let browserErr = "";
   child.stderr.on("data", (d) => {
@@ -342,6 +349,29 @@ async function main() {
         `FAIL: no token after ${TOKEN_WAIT_MS / 1000}s ` +
           `(host=${JSON.stringify(state.host)} iframe=${JSON.stringify(state.iframe)} interactive=${sawInteractive})`,
       );
+      // Dump what the page actually is, so the step summary is diagnosable
+      // without a logged-in log viewer.
+      log(`  url:   ${state.url}`);
+      log(`  title: ${JSON.stringify(state.title)}`);
+      log(`  ready=${state.ready} visible=${state.visible} focused=${state.focused}`);
+      log(`  body:  ${JSON.stringify(state.body)}`);
+      try {
+        const diag = await ev(`(() => ({
+          ua: navigator.userAgent,
+          turnstile: typeof window.turnstile,
+          script: !!document.querySelector('script[src*="challenges.cloudflare.com"]'),
+          iframes: [...document.querySelectorAll('iframe')].map(f => {
+            const r = f.getBoundingClientRect();
+            return [(f.src || '').slice(0, 90), Math.round(r.width), Math.round(r.height)];
+          }),
+          resources: performance.getEntriesByType('resource')
+            .filter(e => /challenges\.cloudflare\.com/.test(e.name))
+            .map(e => [e.name.slice(0, 90), Math.round(e.duration), e.transferSize]),
+        }))()`);
+        log(`  diag:  ${JSON.stringify(diag)}`);
+      } catch (e) {
+        log(`  diag failed: ${e.message}`);
+      }
       exitCode = 1;
       return;
     }
