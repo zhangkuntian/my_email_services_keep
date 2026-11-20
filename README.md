@@ -17,15 +17,70 @@ and the wake page states it outright: *"automated requests also come from your
 network, and we do not wake an app for those on the free plan."* So curl,
 `requests`, and uptime monitors are dead ends no matter what headers they send.
 
-What works, verified against the live site: load the page in Chromium, click the
-**Wake it up** button, which navigates to `/?blitz-wake=<token>` and returns
-`303`, then wait for the app to answer. `main.py` does exactly that and confirms
-the app is actually serving before it reports success.
+What works, verified against the live site: load the page in a real browser,
+clear the Cloudflare Turnstile widget that guards the **Wake it up** button,
+click it, which navigates to `/?blitz-wake=<token>` and returns `303`, then wait
+for the app to answer.
+
+## The Turnstile problem, and why Playwright is the wrong tool
+
+The wake page embeds a Turnstile widget (`data-sitekey=0x4AAAAAAE633AkVPyH8PgB7`,
+`data-action=wake`). The **Wake it up** button stays `disabled` until the widget
+calls `blitzChecked()` with a token.
+
+Playwright cannot get that token. Measured on this exact site, same machine,
+same IP, same UA:
+
+| Control plane | Widget renders | Token | Widget clicks |
+|---|---|---|---|
+| Playwright `chromium.launch` + `button.click()` | yes | **never** | 1 (and it resets the challenge) |
+| Raw CDP + fingerprint-chromium | yes (300×65) | **837 chars in ~13s** | **0** |
+
+Turnstile's managed mode scores *how the browser is being driven* above every
+fingerprint signal. Playwright's launch issues `Runtime.enable` and
+`Target.setAutoAttach`, which the challenge recognises at the protocol layer;
+canvas/WebGL/navigator patches do not reach it. Playwright's bundled Chromium
+also sends `HeadlessChrome/…` in its UA, which makes the gate return bare JSON
+with no wake page at all.
+
+So `wake.mjs` talks to DevTools over a plain WebSocket and sends only:
+
+```
+Target.createTarget / Target.attachToTarget
+Runtime.evaluate          (works without enable)
+Input.dispatchMouseEvent  (works without enable)
+Page.navigate             (works without enable)
+```
+
+No `Runtime.enable`, no `Target.setAutoAttach`, no `DOM.enable`, no `Page.enable`.
+Node ≥ 22 has a global `WebSocket`, so there are **no npm dependencies**.
+
+## Turnstile discipline
+
+The script follows the field notes in `~/work/skills/antiDetectbrowser/SKILL.md`:
+
+1. **Do not click a widget that says "Verifying…".** A managed widget is
+   computing; a click resets the computation. The script waits it out — on this
+   site it clears itself in ~13s with zero clicks, every run.
+2. **A click is only for the interactive form.** If the iframe is the
+   `300×287` / `480×66` interactive variant with a visible checkbox, Cloudflare
+   has already decided the browser looks suspicious and the challenge is
+   "click through or fail". Only then does the script click — once, at the
+   checkbox in the widget's upper-left, with a real pointer path: a jittered
+   bezier from 90–220px outside the box, 12 steps at 8–26ms, a 90–260ms settle,
+   a 60–150ms hold with 1–2px drift, then a drift away. Three instantaneous
+   `mouseMoved → mousePressed → mouseReleased` events are exactly the robot
+   signature interactive Turnstile hunts for.
+3. **Never reload in a loop.** Every reload restarts the challenge and the log
+   just shows `LOADING` forever.
+4. **A stuck run is a dead run.** If no token arrives inside `TOKEN_WAIT_MS`,
+   the script exits 1 rather than grinding on the same fingerprint. The next
+   scheduled run uses a fresh random seed and a fresh profile.
 
 ## One run = one visit
 
-The job does **not** loop. Each run installs Playwright, loads the page once,
-and exits — about 20 seconds of runner time. The visit cadence is controlled
+The job does **not** loop. Each run launches the browser, loads the page once,
+and exits — about 20–30 seconds of runner time. The visit cadence is controlled
 entirely from outside, by how often you POST to the `workflow_dispatch`
 endpoint.
 
@@ -33,22 +88,24 @@ This matters because a free GitHub account allows **20 concurrent jobs**. An
 earlier version had each job loop for 3 hours (36 visits, 5 minutes apart) while
 also being dispatched every 5 minutes. That needs ~35 concurrent runners to keep
 up, so runs queued for hours and the visits happened at times unrelated to when
-they were triggered. One visit per run removes the problem: a run finishes long
-before the next one arrives.
+they were triggered. One visit per run removes the problem.
 
-Standard GitHub-hosted runners are **free for public repositories** (GitHub's
-billing docs list them as usage that "remains free independently"), so the extra
-runs cost nothing.
+Standard GitHub-hosted runners are **free for public repositories**, so the
+extra runs cost nothing.
 
 ## Caching the browser
 
-A cold run spends most of its time downloading Chromium (~170 MB), not visiting
-the site. `~/.cache/ms-playwright` is cached under a key that includes the
-Playwright version, so a hit skips the download while a version bump correctly
-invalidates it (a different Playwright expects a different Chromium build).
+A cold run spends most of its time downloading the browser, not visiting the
+site. `/opt/fpchromium` is cached under a key that includes the pinned
+fingerprint-chromium version, so a hit skips the ~146 MB download while a
+version bump correctly invalidates it.
 
-On a hit the workflow still runs `playwright install-deps chromium`, because the
-cache holds the browser binary but not the apt libraries it links against.
+The version is pinned in the workflow (`FP_VERSION`) on purpose: a browser
+version is itself an identity asset, and a silent bump would change the
+fingerprint mid-flight.
+
+On a cache hit the workflow still installs the apt libraries, because the cache
+holds the binary but not the shared objects it links against.
 
 ## Why the cron is only a backstop
 
@@ -104,18 +161,31 @@ A `204 No Content` response means it was accepted.
 
 ## Running locally
 
+Needs Node ≥ 22 and a fingerprint-chromium build. The script looks for
+`~/Applications/FPChromium/Chromium.app/Contents/MacOS/Chromium` first; override
+with `BROWSER_BIN`.
+
 ```bash
-pip install playwright
-playwright install chromium
-python main.py
+node wake.mjs
 ```
 
 Exit code `0` means the app is awake (either it already was, or the wake button
 worked). Exit code `1` means it could not be woken.
 
+Environment knobs:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BROWSER_BIN` | auto-detected | Browser binary to launch |
+| `TARGET_URL` | the app root | Page to visit |
+| `CDP_PORT` | `9333` | DevTools port |
+| `FP_SEED` | random | Fingerprint seed; fresh per run by default |
+| `TOKEN_WAIT_MS` | `45000` | How long to wait for a Turnstile token |
+| `WAKE_WAIT_MS` | `120000` | How long the app may take to boot |
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| `main.py` | Loads the page in Chromium, clicks the wake button if asleep, verifies the app answers |
-| `.github/workflows/browser.yml` | One browser visit per run; caches Chromium; `*/5` cron as a backstop |
+| `wake.mjs` | Raw-CDP browser visit: clears the Turnstile gate, clicks **Wake it up**, verifies the app answers |
+| `.github/workflows/browser.yml` | One browser visit per run; caches fingerprint-chromium; `*/5` cron as a backstop |
